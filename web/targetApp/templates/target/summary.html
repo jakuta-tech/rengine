@@ -908,7 +908,7 @@ $(document).ready(function(){
 		if ( $.fn.dataTable.isDataTable( '#subdomain_scan_results' ) ) {
 			return false;
 		}
-		var subdomain_ajax_url = '/api/listDatatableSubdomain/?project={{current_project.slug}}&scan_id={{target.id}}&format=datatables';
+		var subdomain_ajax_url = '/api/listDatatableSubdomain/?project={{current_project.slug}}&target_id={{target.id}}&format=datatables';
 		var is_subd_grouping = false;
 		var subd_grouping_col = 8;
 		var subdomain_datatables = $('#subdomain_scan_results').DataTable({
@@ -1215,6 +1215,10 @@ $(document).ready(function(){
 			subdomain_datatables.search($("#subdomains-search").val()).draw();
 		});
 
+		$('#load_important_subdomain_table_btn').click(function() {
+			subdomain_datatables.search('is_important=true').draw();
+		});
+
 		$('input[name=sub_http_status_filter_checkbox]').change(function() {
 			if ($(this).is(':checked')) {
 				subdomain_datatables.column(4).visible(true);
@@ -1503,14 +1507,23 @@ $(document).ready(function(){
 				"targets": 8,
 			},
 			{
-				"render": function(data, type, row) {
-					if (data.includes('http')) {
-						return "<a href='" + htmlEncode(data) + "' target='_blank' class='text-danger'>" + split_into_lines(htmlEncode(data), 150) + "</a>";
+				"render": function ( data, type, row ) {
+					if (data) {
+						const encodedURLData = htmlEncode(data);
+						
+						if (data.toLowerCase().startsWith('http')) {
+							return `<a href="${encodedData}" 
+									target="_blank" 
+									rel="noopener noreferrer" 
+									class="text-danger">
+									${split_into_lines(encodedData, 150)}
+								</a>`;
+						}
 					}
-					return data;
+					return htmlEncode(data || '');
 				},
 				"targets": 11,
-			},
+			}
 			{
 				"render": function(data, type, row) {
 					if (data) {
@@ -1531,7 +1544,9 @@ $(document).ready(function(){
 									</a>
 									<div class="dropdown-menu" style="">
 									<a class="dropdown-item" href="javascript:fetch_gpt_vuln_details(${row['id']}, '${row['name']}');">Fetch GPT Vulnerability Details</a>
-									<a class="dropdown-item" href="javascript:report_hackerone(${row['id']}, '${row['severity']}');">Report to Hackerone</a>
+									{% if user_preferences.bug_bounty_mode %}
+										<a class="dropdown-item" href="javascript:report_hackerone(${row['id']}, '${row['severity']}');">Report to Hackerone</a>
+									{% endif %}
 									<a class="text-danger dropdown-item btn-delete-vulnerability" href="#" id="${row['id']}">Delete Vulnerability</a>
 									</div>
 									</div>`;
@@ -1541,6 +1556,12 @@ $(document).ready(function(){
 				},
 				"targets": 16,
 			},
+			{
+				"render": function ( data, type, row ) {
+					return htmlEncode(data);
+				},
+				"targets": 17,
+			}
 		],
 		"initComplete": function(settings, json) {
 			api = this.api();

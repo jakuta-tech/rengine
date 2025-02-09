@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 
+from datetime import datetime
 from django import http
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, render
@@ -11,7 +12,7 @@ from django.urls import reverse
 from rolepermissions.decorators import has_permission_decorator
 
 from reNgine.common_func import *
-from reNgine.tasks import (run_command, send_discord_message, send_slack_message, send_telegram_message)
+from reNgine.tasks import (run_command, send_discord_message, send_slack_message,send_lark_message, send_telegram_message)
 from scanEngine.forms import *
 from scanEngine.forms import ConfigurationForm
 from scanEngine.models import *
@@ -173,9 +174,7 @@ def interesting_lookup(request, slug):
             form = InterestingLookupForm(request.POST, instance=lookup_keywords)
         else:
             form = InterestingLookupForm(request.POST or None)
-        print(form.errors)
         if form.is_valid():
-            print(form.cleaned_data)
             form.save()
             messages.add_message(
                 request,
@@ -197,34 +196,41 @@ def tool_specific_settings(request, slug):
     # check for incoming form requests
     if request.method == "POST":
 
-        print(request.FILES)
-        if 'gfFileUpload' in request.FILES:
-            gf_file = request.FILES['gfFileUpload']
-            file_extension = gf_file.name.split('.')[len(gf_file.name.split('.'))-1]
-            if file_extension != 'json':
-                messages.add_message(request, messages.ERROR, 'Invalid GF Pattern, upload only *.json extension')
-            else:
+        if 'gfFileUpload[]' in request.FILES:
+            gf_files = request.FILES.getlist('gfFileUpload[]')
+            upload_count = 0
+            for gf_file in gf_files:
+                original_filename = gf_file.name if isinstance(gf_file.name, str) else gf_file.name.decode('utf-8')
                 # remove special chars from filename, that could possibly do directory traversal or XSS
-                filename = re.sub(r'[\\/*?:"<>|]',"", gf_file.name)
-                file_path = '/root/.gf/' + filename
-                file = open(file_path, "w")
-                file.write(gf_file.read().decode("utf-8"))
-                file.close()
-                messages.add_message(request, messages.INFO, 'Pattern {} successfully uploaded'.format(gf_file.name[:4]))
+                original_filename = re.sub(r'[\\/*?:"<>|]',"", original_filename)
+                file_extension = original_filename.split('.')[len(gf_file.name.split('.'))-1]
+                if file_extension == 'json':
+                    base_filename = os.path.splitext(original_filename)[0]
+                    file_path = '/root/.gf/' + base_filename + '.json'
+                    file = open(file_path, "w")
+                    file.write(gf_file.read().decode("utf-8"))
+                    file.close()
+                    upload_count += 1
+            messages.add_message(request, messages.INFO, f'{upload_count} GF files successfully uploaded')
             return http.HttpResponseRedirect(reverse('tool_settings', kwargs={'slug': slug}))
 
-        elif 'nucleiFileUpload' in request.FILES:
-            nuclei_file = request.FILES['nucleiFileUpload']
-            file_extension = nuclei_file.name.split('.')[len(nuclei_file.name.split('.'))-1]
-            if file_extension != 'yaml':
+        elif 'nucleiFileUpload[]' in request.FILES:
+            nuclei_files = request.FILES.getlist('nucleiFileUpload[]')
+            upload_count = 0
+            for nuclei_file in nuclei_files:
+                original_filename = nuclei_file.name if isinstance(nuclei_file.name, str) else nuclei_file.name.decode('utf-8')
+                original_filename = re.sub(r'[\\/*?:"<>|]',"", original_filename)
+                file_extension = original_filename.split('.')[len(nuclei_file.name.split('.'))-1]
+                if file_extension in ['yaml', 'yml']:
+                    base_filename = os.path.splitext(original_filename)[0]
+                    file_path = '/root/nuclei-templates/' + base_filename + '.yaml'
+                    file = open(file_path, "w")
+                    file.write(nuclei_file.read().decode("utf-8"))
+                    file.close()
+                    upload_count += 1
+            if upload_count == 0:
                 messages.add_message(request, messages.ERROR, 'Invalid Nuclei Pattern, upload only *.yaml extension')
-            else:
-                filename = re.sub(r'[\\/*?:"<>|]',"", nuclei_file.name)
-                file_path = '/root/nuclei-templates/' + filename
-                file = open(file_path, "w")
-                file.write(nuclei_file.read().decode("utf-8"))
-                file.close()
-                messages.add_message(request, messages.INFO, 'Nuclei Pattern {} successfully uploaded'.format(nuclei_file.name[:-5]))
+            messages.add_message(request, messages.INFO, f'{upload_count} Nuclei Patterns successfully uploaded')
             return http.HttpResponseRedirect(reverse('tool_settings', kwargs={'slug': slug}))
 
         elif 'nuclei_config_text_area' in request.POST:
@@ -306,6 +312,7 @@ def notification_settings(request, slug):
         if form.is_valid():
             form.save()
             send_slack_message('*reNgine*\nCongratulations! your notification services are working.')
+            send_lark_message('*reNgine*\nCongratulations! your notification services are working.')
             send_telegram_message('*reNgine*\nCongratulations! your notification services are working.')
             send_discord_message('**reNgine**\nCongratulations! your notification services are working.')
             messages.add_message(
@@ -356,8 +363,7 @@ def proxy_settings(request, slug):
 
 
 @has_permission_decorator(PERM_MODIFY_SCAN_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
-def test_hackerone(request):
-    context = {}
+def test_hackerone(request, slug):
     if request.method == "POST":
         headers = {
             'Accept': 'application/json'
@@ -457,11 +463,49 @@ def tool_arsenal_section(request, slug):
 
 
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
+def llm_toolkit_section(request, slug):
+    context = {}
+    list_all_models_url = f'{OLLAMA_INSTANCE}/api/tags'
+    response = requests.get(list_all_models_url)
+    all_models = []
+    selected_model = None
+    all_models = DEFAULT_GPT_MODELS.copy()
+    if response.status_code == 200:
+        models = response.json()
+        ollama_models = models.get('models')
+        date_format = "%Y-%m-%dT%H:%M:%S"
+        for model in ollama_models:
+           all_models.append({**model, 
+                'modified_at': datetime.strptime(model['modified_at'].split('.')[0], date_format),
+                'is_local': True,
+            })
+    # find selected model name from db
+    selected_model = OllamaSettings.objects.first()
+    if selected_model:
+        selected_model = {'selected_model': selected_model.selected_model}
+    else:
+        # use gpt3.5-turbo as default
+        selected_model = {'selected_model': 'gpt-3.5-turbo'}
+    for model in all_models:
+        if model['name'] == selected_model['selected_model']:
+            model['selected'] = True
+    context['installed_models'] = all_models
+    # show error message for openai key, if any gpt is selected
+    openai_key = get_open_ai_key()
+    if not openai_key and 'gpt' in selected_model['selected_model']:
+        context['openai_key_error'] = True
+    return render(request, 'scanEngine/settings/llm_toolkit.html', context)
+
+
+@has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def api_vault(request, slug):
     context = {}
     if request.method == "POST":
         key_openai = request.POST.get('key_openai')
         key_netlas = request.POST.get('key_netlas')
+        key_chaos = request.POST.get('key_chaos')
+        key_hackerone = request.POST.get('key_hackerone')
+        username_hackerone = request.POST.get('username_hackerone')
 
 
         if key_openai:
@@ -480,10 +524,43 @@ def api_vault(request, slug):
             else:
                 NetlasAPIKey.objects.create(key=key_netlas)
 
+        if key_chaos:
+            chaos_api_key = ChaosAPIKey.objects.first()
+            if chaos_api_key:
+                chaos_api_key.key = key_chaos
+                chaos_api_key.save()
+            else:
+                ChaosAPIKey.objects.create(key=key_chaos)
+
+        if key_hackerone and username_hackerone:
+            hackerone_api_key = HackerOneAPIKey.objects.first()
+            if hackerone_api_key:
+                hackerone_api_key.username = username_hackerone
+                hackerone_api_key.key = key_hackerone
+                hackerone_api_key.save()
+            else:
+                HackerOneAPIKey.objects.create(
+                    username=username_hackerone, 
+                    key=key_hackerone
+                )
+
     openai_key = OpenAiAPIKey.objects.first()
     netlas_key = NetlasAPIKey.objects.first()
+    chaos_key = ChaosAPIKey.objects.first()
+    h1_key = HackerOneAPIKey.objects.first()
+    if h1_key:
+        hackerone_key = h1_key.key
+        hackerone_username = h1_key.username
+    else:
+        hackerone_key = None
+        hackerone_username = None
+
     context['openai_key'] = openai_key
     context['netlas_key'] = netlas_key
+    context['chaos_key'] = chaos_key
+    context['hackerone_key'] = hackerone_key
+    context['hackerone_username'] = hackerone_username
+    
     return render(request, 'scanEngine/settings/api.html', context)
 
 
@@ -492,7 +569,6 @@ def add_tool(request, slug):
     form = ExternalToolForm()
     if request.method == "POST":
         form = ExternalToolForm(request.POST)
-        print(form.errors)
         if form.is_valid():
             # add tool
             install_command = form.data['install_command']

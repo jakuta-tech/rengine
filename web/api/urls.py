@@ -19,6 +19,8 @@ router.register(r'listEndPointChanges', EndPointChangesViewSet)
 router.register(r'listIps', IpAddressViewSet)
 router.register(r'listActivityLogs', ListActivityLogsViewSet)
 router.register(r'listScanLogs', ListScanLogsViewSet)
+router.register(r'notifications', InAppNotificationManagerViewSet, basename='notification')
+router.register(r'hackerone-programs', HackerOneProgramViewSet, basename='hackerone_program')
 
 urlpatterns = [
     url('^', include(router.urls)),
@@ -156,7 +158,7 @@ urlpatterns = [
         name='waf_detector'),
     path(
         'tools/gpt_vulnerability_report/',
-        GPTVulnerabilityReportGenerator.as_view(),
+        LLMVulnerabilityReportGenerator.as_view(),
         name='gpt_vulnerability_report_generator'),
     path(
         'tools/gpt_get_possible_attacks/',
@@ -178,6 +180,10 @@ urlpatterns = [
         'tool/uninstall/',
         UninstallTool.as_view(),
         name='uninstall_tool'),
+	path(
+        'tool/ollama/',
+        OllamaManager.as_view(),
+        name='ollama_manager'),
     path(
         'rengine/update/',
         RengineUpdateCheck.as_view(),
@@ -235,6 +241,11 @@ urlpatterns = [
         'action/create/project',
         CreateProjectApi.as_view(),
         name='create_project'),
+    path(
+        'toggle-bug-bounty-mode/', 
+        ToggleBugBountyModeView.as_view(), 
+        name='toggle_bug_bounty_mode'
+    ),
 ]
 
 urlpatterns += router.urls

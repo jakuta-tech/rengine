@@ -1,6 +1,5 @@
 import csv
 import io
-import ipaddress
 import logging
 import validators
 
@@ -51,7 +50,8 @@ def add_target(request, slug):
                 bulk_targets = [t.rstrip() for t in request.POST['addTargets'].split('\n') if t]
                 logger.info(f'Adding multiple targets: {bulk_targets}')
                 description = request.POST.get('targetDescription', '')
-                h1_team_handle = request.POST.get('targetH1TeamHandle')
+                h1_team_handle = request.POST.get('targetH1TeamHandle', '')
+                organization_name = request.POST.get('targetOrganization')
                 for target in bulk_targets:
                     target = target.rstrip('\n')
                     http_urls = []
@@ -92,8 +92,8 @@ def add_target(request, slug):
                         domains.append(target)
 
                     elif is_range:
-                        ips = get_ips_from_cidr_range(target)
-                        for ip_address in ips:
+                        _ips = get_ips_from_cidr_range(target)
+                        for ip_address in _ips:
                             ips.append(ip_address)
                             domains.append(ip_address)
                     else:
@@ -121,6 +121,18 @@ def add_target(request, slug):
                             if created:
                                 logger.info(f'Added new domain {domain.name}')
 
+                            if organization_name:
+                                organization = None
+                                if Organization.objects.filter(name=organization_name).exists():
+                                    organization = organization_query[0]
+                                else:
+                                    organization = Organization.objects.create(
+                                        name=organization_name,
+                                        project=project,
+                                        insert_date=timezone.now())
+                                organization.domains.add(domain)
+
+
                     for http_url in http_urls:
                         http_url = sanitize_url(http_url)
                         endpoint, created = EndPoint.objects.get_or_create(
@@ -139,10 +151,15 @@ def add_target(request, slug):
                         if created:
                             logger.warning(f'Added new IP {ip}')
 
-                    for port in ports:
-                        port, created = Port.objects.get_or_create(number=port_number)
+                    for port_number in ports:
+                        res = get_port_service_description(port_number)
+                        port, created = update_or_create_port(
+                            port_number=port_number,
+                            service_name=res.get('service_name', ''),
+                            description=res.get('description', '')
+                        )
                         if created:
-                            logger.warning(f'Added new port {port.number}.')
+                            logger.warning(f'Added new port {port_number} to DB')
 
             # Import from txt / csv
             elif 'import-txt-target' in request.POST or 'import-csv-target' in request.POST:
@@ -155,6 +172,7 @@ def add_target(request, slug):
                         'Files uploaded are not .txt or .csv files.')
                     return http.HttpResponseRedirect(reverse('add_target', kwargs={'slug': slug}))
 
+                #Specters Fix
                 if txt_file:
                     is_txt = txt_file.content_type == 'text/plain' or txt_file.name.split('.')[-1] == 'txt'
                     if not is_txt:
@@ -167,10 +185,11 @@ def add_target(request, slug):
                     io_string = io.StringIO(txt_content)
                     for target in io_string:
                         target_domain = target.rstrip("\n").rstrip("\r")
+                        domain = None  # Move the domain variable declaration here
                         domain_query = Domain.objects.filter(name=target_domain)
                         if not domain_query.exists():
-                            if not validators.domain(domain):
-                                messages.add_message(request, messages.ERROR, f'Domain {domain} is not a valid domain name. Skipping.')
+                            if not validators.domain(target_domain):  # Change 'domain' to 'target_domain'
+                                messages.add_message(request, messages.ERROR, f'Domain {target_domain} is not a valid domain name. Skipping.')
                                 continue
                             Domain.objects.create(
                                 name=target_domain,
@@ -191,18 +210,60 @@ def add_target(request, slug):
                     io_string = io.StringIO(csv_content)
                     for column in csv.reader(io_string, delimiter=','):
                         domain = column[0]
-                        description = None if len(column) == 1 else column[1]
+                        description = None if len(column) <= 1 else column[1]
+                        organization = None if len(column) <= 2 else column[2]
                         domain_query = Domain.objects.filter(name=domain)
                         if not domain_query.exists():
                             if not validators.domain(domain):
                                 messages.add_message(request, messages.ERROR, f'Domain {domain} is not a valid domain name. Skipping.')
                                 continue
-                            Domain.objects.create(
+                            domain_obj = Domain.objects.create(
                                 name=domain,
                                 project=project,
                                 description=description,
                                 insert_date=timezone.now())
                             added_target_count += 1
+                        
+                            # Optionally add domain to organization
+                            if organization:
+                                organization_query = Organization.objects.filter(name=organization)
+                                if organization_query.exists():
+                                    organization = organization_query[0]
+                                else:
+                                    organization = Organization.objects.create(
+                                        name=organization,
+                                        project=project,
+                                        insert_date=timezone.now())
+                                organization.domains.add(domain_obj)
+            elif ip_target:
+                # add ip's from "resolve and add ip address" tab
+                resolved_ips = [ip.rstrip() for ip in request.POST.getlist('resolved_ip_domains') if ip]
+                for ip in resolved_ips:
+                    is_domain = bool(validators.domain(ip))
+                    is_ip = bool(validators.ipv4(ip)) or bool(validators.ipv6(ip))
+                    description = request.POST.get('targetDescription', '')
+                    h1_team_handle = request.POST.get('targetH1TeamHandle', '')
+                    if not Domain.objects.filter(name=ip).exists():
+                        domain, created = Domain.objects.get_or_create(
+                            name=ip,
+                            description=description,
+                            h1_team_handle=h1_team_handle,
+                            project=project,
+                            ip_address_cidr=ip if is_ip else None)
+                        domain.insert_date = timezone.now()
+                        domain.save()
+                        added_target_count += 1
+                        if created:
+                            logger.info(f'Added new domain {domain.name}')
+                        if is_ip:
+                            ip_data = get_ip_info(ip)
+                            ip, created = IpAddress.objects.get_or_create(address=ip)
+                            ip.reverse_pointer = ip_data.reverse_pointer
+                            ip.is_private = ip_data.is_private
+                            ip.version = ip_data.version
+                            ip.save()
+                            if created:
+                                logger.info(f'Added new IP {ip}')
 
         except Exception as e:
             logger.exception(e)
@@ -270,11 +331,12 @@ def delete_targets(request, slug):
         list_of_domains = []
         for key, value in request.POST.items():
             if key != "list_target_table_length" and key != "csrfmiddlewaretoken":
+                list_of_domains.append(value)
                 Domain.objects.filter(id=value).delete()
         messages.add_message(
             request,
             messages.INFO,
-            'Targets deleted!')
+            f'{len(list_of_domains)} targets deleted!')
     return http.HttpResponseRedirect(reverse('list_target', kwargs={'slug': slug}))
 
 
@@ -540,20 +602,3 @@ def update_organization(request, slug, id):
     }
     return render(request, 'organization/update.html', context)
 
-def get_ip_info(ip_address):
-    is_ipv4 = bool(validators.ipv4(ip_address))
-    is_ipv6 = bool(validators.ipv6(ip_address))
-    ip_data = None
-    if is_ipv4:
-        ip_data = ipaddress.IPv4Address(ip_address)
-    elif is_ipv6:
-        ip_data = ipaddress.IPv6Address(ip_address)
-    else:
-        return None
-    return ip_data
-
-def get_ips_from_cidr_range(target):
-    try:
-        return [str(ip) for ip in ipaddress.IPv4Network(target)]
-    except Exception as e:
-        logger.error(f'{target} is not a valid CIDR range. Skipping.')
